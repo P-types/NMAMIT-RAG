@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
-
+from fastapi.middleware.cors import CORSMiddleware
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
 from groq import Groq
@@ -160,6 +160,13 @@ app = FastAPI(
     description="NMAMIT information system using Neo4j, Qdrant and Groq.",
     version="1.0.0",
     lifespan=lifespan
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
