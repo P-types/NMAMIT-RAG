@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 import graph_rag
@@ -78,8 +77,8 @@ async def lifespan(app: FastAPI):
 
     print("\nLoading embedding model...")
 
-    embedding_model = SentenceTransformer(
-        graph_rag.EMBEDDING_MODEL
+    embedding_model = graph_rag.FastEmbedAdapter(
+         graph_rag.EMBEDDING_MODEL
     )
 
     print("Embedding model loaded.")

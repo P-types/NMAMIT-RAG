@@ -25,8 +25,29 @@ import numpy as np
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from groq import Groq
+
+class FastEmbedAdapter:
+    """
+    Adapter that makes FastEmbed behave like the
+    SentenceTransformer interface used by this RAG pipeline.
+    """
+
+    def __init__(self, model_name):
+        self.model = TextEmbedding(model_name=model_name)
+
+    def encode(self, texts, normalize_embeddings=True):
+        vectors = np.asarray(
+            list(self.model.embed(texts)),
+            dtype=np.float32
+        )
+
+        if normalize_embeddings:
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+            vectors = vectors / np.clip(norms, 1e-12, None)
+
+        return vectors
 
 
 # ============================================================
@@ -1490,7 +1511,7 @@ def main():
     print("=" * 70)
 
     print("\nLoading embedding model...")
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+    embedding_model = FastEmbedAdapter(EMBEDDING_MODEL)
     print("Embedding model loaded.")
 
     print("Connecting to Neo4j...")
