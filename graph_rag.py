@@ -25,36 +25,14 @@ import numpy as np
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
-from fastembed import TextEmbedding
+from sentence_transformers import SentenceTransformer
 from groq import Groq
-
-class FastEmbedAdapter:
-    """
-    Adapter that makes FastEmbed behave like the
-    SentenceTransformer interface used by this RAG pipeline.
-    """
-
-    def __init__(self, model_name):
-        self.model = TextEmbedding(model_name=model_name)
-
-    def encode(self, texts, normalize_embeddings=True):
-        vectors = np.asarray(
-            list(self.model.embed(texts)),
-            dtype=np.float32
-        )
-
-        if normalize_embeddings:
-            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-            vectors = vectors / np.clip(norms, 1e-12, None)
-
-        return vectors
-
 
 # ============================================================
 # ENVIRONMENT
 # ============================================================
 
-load_dotenv()
+load_dotenv(".env")
 
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
@@ -983,82 +961,191 @@ def jaccard(a, b):
         return 0.0
     return len(a & b) / len(a | b)
 
+PROGRAM_SCOPE_TERMS = {
+    "engineering": {
+        "btech", "b tech", "b.e", "be", "engineering", "biotechnology",
+        "computer science", "information science", "computer communication",
+        "artificial intelligence", "data science", "electrical", "electronics",
+        "mechanical", "civil", "robotics", "automobile", "branch", "branches"
+    },
+    "minor": {"minor", "minor degree", "minor program", "minor programme"},
+    "postgraduate": {"mca", "m.tech", "mtech", "mba", "phd", "postgraduate", "master", "doctoral"},
+}
+
+def detect_program_scope(question):
+    q = normalize_text(question)
+    if any(term in q for term in PROGRAM_SCOPE_TERMS["minor"]):
+        return "minor"
+    if any(term in q for term in PROGRAM_SCOPE_TERMS["postgraduate"]):
+        return "postgraduate"
+    # NMAMIT is primarily being queried here as an engineering institute.
+    # For an unqualified "what programs" question, prefer engineering
+    # degree evidence and do not mix in minor/MCA pages.
+    return "engineering"
+
+
+def program_scope_score(text, scope):
+    text = normalize_text(text)
+    if scope == "minor":
+        return sum(1 for t in PROGRAM_SCOPE_TERMS["minor"] if t in text)
+    if scope == "postgraduate":
+        return sum(1 for t in PROGRAM_SCOPE_TERMS["postgraduate"] if t in text)
+    return sum(1 for t in PROGRAM_SCOPE_TERMS["engineering"] if t in text)
+
 
 def rerank_chunks(
     chunks, query_type, entity_phrases, question_tokens, graph_terms, cfg
 ):
+    """Rank retrieved chunks using semantic + lexical + intent signals.
+
+    The important rule is: vector similarity discovers candidates; it does not
+    by itself make a chunk relevant. Program questions receive an additional
+    scope gate so unrelated placement/faculty/facility/minor pages do not leak
+    into the answer.
     """
-    relevance = 0.50*vector + 0.15*entity overlap + 0.12*keyword overlap
-              + 0.12*intent vocabulary + official-source/metadata bonus
-              + graph agreement bonus - short-chunk penalty
-    then drop near-duplicates and cap chunks per page.
-    """
-    lexicon = set(INTENT_LEXICON.get(query_type, []))
     qset = set(question_tokens)
     phrases = [normalize_text(p) for p in entity_phrases if normalize_text(p)]
-    graph_phrases = [
-        normalize_text(g) for g in graph_terms
-        if len(normalize_text(g)) >= 4
-    ]
+    graph_phrases = [normalize_text(g) for g in graph_terms if len(normalize_text(g)) >= 4]
+    desired_terms = set(INTENT_LEXICON.get(query_type, []))
+    conflicts = {
+        "location": {"placement", "recruiter", "salary", "package", "faculty", "research"},
+        "programs": {"placement", "recruiter", "salary", "package", "hostel", "canteen", "faculty", "professor", "event", "hackathon"},
+        "departments": {"placement", "salary", "event", "hackathon"},
+        "faculty": {"placement", "salary", "event"},
+        "facilities": {"placement", "salary", "admission"},
+        "admissions": {"placement", "salary", "research"},
+        "fees": {"placement", "research", "event"},
+        "placements": {"admission", "fees", "event"},
+        "research": {"placement", "admission", "fees"},
+        "clubs": {"placement", "admission", "fees"},
+        "events": {"placement", "fees", "admission"},
+    }.get(query_type, set())
+
+    program_scope = detect_program_scope(" ".join(question_tokens)) if query_type == "programs" else None
 
     for c in chunks:
-
-        text = normalize_text(
-            f"{c['content']} {c.get('page_title') or ''} {c.get('section') or ''}"
-        )
+        content = normalize_text(c.get("content") or "")
+        title = normalize_text(c.get("page_title") or "")
+        section = normalize_text(c.get("section") or "")
+        text = f"{content} {title} {section}"
         tokens = set(text.split())
         c["_tokens"] = tokens
 
-        ent = (
-            sum(1 for p in phrases if p in text) / len(phrases)
-            if phrases else 0.0
-        )
-        kw = len(qset & tokens) / max(1, len(qset))
-        intent = (
-            min(1.0, len(lexicon & tokens) / 4.0) if lexicon else 0.0
-        )
+        vector_score = float(c.get("score", 0.0))
+        entity_score = sum(1 for p in phrases if p in text) / len(phrases) if phrases else 0.0
+        keyword_score = len(qset & tokens) / max(1, len(qset))
+        intent_score = min(1.0, len(desired_terms & tokens) / 4.0) if desired_terms else 0.0
+        graph_score = min(0.12, 0.04 * sum(1 for g in graph_phrases if g in text))
 
-        url = (c.get("source_url") or "").lower()
-        meta = 0.0
-        if "nmamit" in url or "nitte" in url:
-            meta += 0.05
-        if c.get("page_title") or c.get("section"):
-            meta += 0.03
+        title_section_score = 0.0
+        if query_type == "location" and any(x in section or x in title for x in ("address", "location", "contact", "campus")):
+            title_section_score = 0.42
+        elif query_type == "programs" and any(x in section or x in title for x in ("program", "course", "academic", "degree", "undergraduate", "b tech", "btech")):
+            title_section_score = 0.40
+        elif query_type == "departments" and ("department" in section or "department" in title):
+            title_section_score = 0.42
+        elif query_type == "faculty" and any(x in section or x in title for x in ("faculty", "staff", "people")):
+            title_section_score = 0.42
+        elif query_type == "facilities" and any(x in section or x in title for x in ("facility", "facilities", "infrastructure", "campus")):
+            title_section_score = 0.38
+        elif query_type == "placements" and ("placement" in section or "placement" in title):
+            title_section_score = 0.45
+        elif query_type == "research" and any(x in section or x in title for x in ("research", "publication", "project", "innovation")):
+            title_section_score = 0.42
 
-        agree = min(0.15, 0.05 * sum(1 for g in graph_phrases if g in text))
-        quality = -0.1 if len(c["content"]) < 100 else 0.0
+        metadata_score = 0.08 if "nitte.edu.in" in (c.get("source_url") or "").lower() else 0.0
+        metadata_score += 0.025 if title else 0.0
+        metadata_score += 0.025 if section else 0.0
 
+        conflict_count = sum(1 for term in conflicts if term in tokens)
+        conflict_penalty = min(0.30, conflict_count * 0.055)
+
+        scope_score = 0.0
+        scope_penalty = 0.0
+        if query_type == "programs":
+            scope_hits = program_scope_score(text, program_scope)
+            scope_score = min(0.42, scope_hits * 0.07)
+            if program_scope == "engineering":
+                # Keep minor/postgraduate material out of an unqualified
+                # engineering-program answer unless it also clearly contains
+                # engineering degree evidence.
+                minor_hits = sum(1 for t in PROGRAM_SCOPE_TERMS["minor"] if t in text)
+                pg_hits = sum(1 for t in PROGRAM_SCOPE_TERMS["postgraduate"] if t in text)
+                engineering_hits = program_scope_score(text, "engineering")
+                if minor_hits and engineering_hits == 0:
+                    scope_penalty += 0.35
+                if pg_hits and engineering_hits == 0:
+                    scope_penalty += 0.25
+            elif program_scope == "minor":
+                if program_scope_score(text, "minor") == 0:
+                    scope_penalty += 0.40
+            elif program_scope == "postgraduate":
+                if program_scope_score(text, "postgraduate") == 0:
+                    scope_penalty += 0.40
+
+        location_boost = 0.0
+        if query_type == "location":
+            location_hits = len({"nitte", "udupi", "karkala", "karnataka", "574110", "address", "campus"} & tokens)
+            location_boost = min(0.32, location_hits * 0.055)
+
+        c["topic_match"] = min(1.0, intent_score + scope_score + title_section_score * 0.7)
         c["relevance"] = round(
-            0.50 * c["score"] + 0.15 * ent + 0.12 * kw + 0.12 * intent
-            + meta + agree + quality,
+            0.38 * vector_score
+            + 0.12 * entity_score
+            + 0.10 * keyword_score
+            + 0.13 * intent_score
+            + title_section_score
+            + metadata_score
+            + graph_score
+            + location_boost
+            + scope_score
+            - conflict_penalty
+            - scope_penalty,
             4,
         )
 
     ranked = sorted(chunks, key=lambda c: -c["relevance"])
+    if not ranked:
+        return [], 0
 
     selected = []
     per_page = defaultdict(int)
+    best = ranked[0]["relevance"]
 
     for c in ranked:
+        text = " ".join(c.get("_tokens", set()))
+
+        if query_type == "programs":
+            # Hard topical gate. A high vector score cannot rescue a chunk
+            # that contains no program/degree evidence.
+            if program_scope_score(
+                normalize_text(f"{c.get('content','')} {c.get('page_title','')} {c.get('section','')}"),
+                program_scope,
+            ) == 0:
+                continue
+            if c["relevance"] < 0.32 and c["score"] < 0.72:
+                continue
+        else:
+            threshold = {"location": 0.22, "departments": 0.22, "faculty": 0.22, "facilities": 0.22,
+                         "admissions": 0.22, "fees": 0.22, "placements": 0.22, "research": 0.22,
+                         "clubs": 0.22, "events": 0.22}.get(query_type, 0.12)
+            if c["topic_match"] < threshold and c["score"] < 0.82:
+                continue
 
         if c["score"] < MIN_VECTOR_SCORE and c["relevance"] < 0.30:
             continue
-
-        # drop chunks far weaker than the best one (off-topic tail)
-        if c["relevance"] < 0.40 * ranked[0]["relevance"]:
+        if c["relevance"] < max(0.30, 0.58 * best):
             continue
 
         page = c.get("page_title") or c.get("source_url") or "?"
         if per_page[page] >= cfg["per_page"]:
             continue
-
         if any(jaccard(c["_tokens"], s["_tokens"]) >= 0.80 for s in selected):
             continue
 
-        per_page[page] += 1
         c["strong"] = c["relevance"] >= 0.55
+        per_page[page] += 1
         selected.append(c)
-
         if len(selected) >= cfg["vector_keep"]:
             break
 
@@ -1292,6 +1379,14 @@ GROUNDING RULES
    missing.
 8. Do not mention retrieval, Neo4j, Qdrant, chunks or "evidence" labels.
 9. Do not write a Sources section; it is appended automatically.
+10. Answer only the category asked about. Never add loosely related information.
+11. For a generic "what programs does NMAMIT offer" question, treat the requested
+    category as engineering/undergraduate engineering programs unless the question
+    explicitly asks for minors or postgraduate programs. Do not mix MCA, minor
+    degrees, certificates, placements, faculty, facilities or events into that list.
+12. If a retrieved document is only tangentially related, ignore it.
+13. If the evidence is incomplete, give only the supported items and clearly state
+    that the available evidence may be incomplete.
 
 STYLE
 {style_instructions(query_info['query_type'], exhaustive)}
@@ -1401,16 +1496,87 @@ def retrieve_and_answer(
     # ---------------- VECTOR RETRIEVAL ----------------
 
     vector_query = query_info["search_query"]
+
+    # Add intent-specific retrieval terms.
+    # These are retrieval hints, not factual information.
+
+    QUERY_HINTS = {
+        "location": (
+            "campus location address "
+            "contact details how to reach"
+        ),
+
+        "programs": (
+            "engineering programs B.Tech programs undergraduate engineering "
+            "degrees branches courses intake duration offered"
+        ),
+
+        "departments": (
+            "departments branches academic departments "
+            "HOD"
+        ),
+
+        "faculty": (
+            "faculty professors teaching staff "
+            "academic staff"
+        ),
+
+        "facilities": (
+            "campus facilities infrastructure "
+            "library hostel laboratory sports"
+        ),
+
+        "admissions": (
+            "admission eligibility application "
+            "entrance requirements"
+        ),
+
+        "fees": (
+            "fees tuition scholarship payment"
+        ),
+
+        "placements": (
+            "placements recruiters companies "
+            "salary package internship"
+        ),
+
+        "research": (
+            "research publications projects patents "
+            "research centres"
+        ),
+
+        "clubs": (
+            "student clubs societies chapters "
+            "student activities"
+        ),
+
+        "events": (
+            "events fests workshops seminars "
+            "hackathons conferences"
+        ),
+    }
+
+    hint = QUERY_HINTS.get(query_type)
+
+    if hint:
+        vector_query = f"{vector_query} {hint}"
+
+    # Add canonical graph entity name if necessary
     if seeds:
         canonical = seeds[0]["name"]
+
         if (
-            normalize_text(canonical) not in normalize_text(vector_query)
+            normalize_text(canonical)
+            not in normalize_text(vector_query)
             and len(canonical) < 80
         ):
             vector_query = f"{vector_query} {canonical}"
 
     candidates = vector_search(
-        qdrant, embedding_model, vector_query, cfg["vector_fetch"]
+        qdrant,
+        embedding_model,
+        vector_query,
+        cfg["vector_fetch"]
     )
 
     entity_phrases = list(query_info["entities"]) + [s["name"] for s in seeds]
@@ -1511,7 +1677,7 @@ def main():
     print("=" * 70)
 
     print("\nLoading embedding model...")
-    embedding_model = FastEmbedAdapter(EMBEDDING_MODEL)
+    embedding_model = SentenceTransformer(EMBEDDING_MODEL)
     print("Embedding model loaded.")
 
     print("Connecting to Neo4j...")

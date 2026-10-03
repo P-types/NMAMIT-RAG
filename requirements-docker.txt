@@ -1,0 +1,10 @@
+fastapi==0.142.2
+uvicorn[standard]
+sentence-transformers
+neo4j
+qdrant-client
+groq
+python-dotenv
+pydantic
+numpy
+torch

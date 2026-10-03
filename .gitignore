@@ -87,3 +87,24 @@ hf_cache/
 .ipynb_checkpoints/
 # Local dependency backup
 requirements-full.txt
+
+# Generated RAG datasets / graph exports
+chunks.json
+graph_data.json
+graph_edges.json
+graph_edges_normalized.json
+graph_edges_resolved.json
+graph_nodes.json
+graph_nodes_normalized.json
+graph_nodes_resolved.json
+nmamit_data.json
+python_extracted.json
+python_extract_failed.py
+graph_test.json
+
+# Frontend dependencies
+frontend/node_modules/
+frontend/dist/
+
+# Docker
+*.tar

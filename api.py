@@ -1,19 +1,24 @@
 import os
 from contextlib import asynccontextmanager
 
+from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
+
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
 from groq import Groq
 
 import graph_rag
 
-QDRANT_COLLECTION = graph_rag.QDRANT_COLLECTION
 
-load_dotenv()
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+load_dotenv(".env")
 
 
 # ============================================================
@@ -27,7 +32,10 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "nmamit_chunks")
+QDRANT_COLLECTION = os.getenv(
+    "QDRANT_COLLECTION",
+    "nmamit_chunks"
+)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -57,6 +65,108 @@ class AskResponse(BaseModel):
 
 
 # ============================================================
+# NEO4J DRIVER CREATION
+# ============================================================
+
+def create_neo4j_driver():
+    """
+    Create a Neo4j driver with connection settings suitable
+    for a long-running FastAPI application.
+    """
+
+    if not NEO4J_URI:
+        raise RuntimeError("NEO4J_URI is missing.")
+
+    if not NEO4J_USERNAME:
+        raise RuntimeError("NEO4J_USERNAME is missing.")
+
+    if not NEO4J_PASSWORD:
+        raise RuntimeError("NEO4J_PASSWORD is missing.")
+
+    return GraphDatabase.driver(
+        NEO4J_URI,
+        auth=(
+            NEO4J_USERNAME,
+            NEO4J_PASSWORD
+        ),
+        connection_timeout=30,
+        connection_acquisition_timeout=30,
+        max_connection_lifetime=300,
+        keep_alive=True,
+    )
+
+
+# ============================================================
+# NEO4J CONNECTION CHECK
+# ============================================================
+
+def ensure_neo4j_connection():
+    """
+    Verify the current Neo4j connection.
+
+    If the existing driver has become invalid, recreate it.
+    """
+
+    global driver
+
+    if driver is None:
+        print(
+            "Neo4j driver does not exist. Creating one...",
+            flush=True
+        )
+
+        driver = create_neo4j_driver()
+        driver.verify_connectivity()
+
+        print(
+            "Neo4j connection created.",
+            flush=True
+        )
+
+        return
+
+    try:
+
+        driver.verify_connectivity()
+
+        print(
+            "Neo4j connection verified.",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            "\nNeo4j connection check failed.",
+            flush=True
+        )
+
+        print(
+            f"Reason: {e}",
+            flush=True
+        )
+
+        print(
+            "Recreating Neo4j driver...",
+            flush=True
+        )
+
+        try:
+            driver.close()
+        except Exception:
+            pass
+
+        driver = create_neo4j_driver()
+
+        driver.verify_connectivity()
+
+        print(
+            "Neo4j connection restored.",
+            flush=True
+        )
+
+
+# ============================================================
 # STARTUP
 # ============================================================
 
@@ -70,43 +180,74 @@ async def lifespan(app: FastAPI):
     global schema
 
     print("=" * 70)
-    print("STARTING NMAMIT GRAPH RAG API")
+    print(
+        "STARTING NMAMIT GRAPH RAG API",
+        flush=True
+    )
     print("=" * 70)
 
-    # ---------------- EMBEDDING MODEL ----------------
+    # ========================================================
+    # EMBEDDING MODEL
+    # ========================================================
 
-    print("\nLoading embedding model...")
-
-    embedding_model = graph_rag.FastEmbedAdapter(
-         graph_rag.EMBEDDING_MODEL
+    print(
+        "\nLoading embedding model...",
+        flush=True
     )
 
-    print("Embedding model loaded.")
-
-    # ---------------- NEO4J ----------------
-
-    print("Connecting to Neo4j...")
-
-    driver = GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
+    embedding_model = SentenceTransformer(
+        graph_rag.EMBEDDING_MODEL
     )
+
+    print(
+        "Embedding model loaded.",
+        flush=True
+    )
+
+    # ========================================================
+    # NEO4J
+    # ========================================================
+
+    print(
+        "\nConnecting to Neo4j...",
+        flush=True
+    )
+
+    driver = create_neo4j_driver()
 
     driver.verify_connectivity()
 
-    print("Neo4j connected.")
+    print(
+        "Neo4j connected.",
+        flush=True
+    )
+
+    # ========================================================
+    # LOAD NEO4J SCHEMA
+    # ========================================================
+
+    print(
+        "Loading Neo4j schema...",
+        flush=True
+    )
 
     schema = graph_rag.load_schema(driver)
 
     print(
         f"Schema loaded: "
         f"{len(schema['rel_types'])} relationship types, "
-        f"{len(schema['entity_types'])} entity types."
+        f"{len(schema['entity_types'])} entity types.",
+        flush=True
     )
 
-    # ---------------- QDRANT ----------------
+    # ========================================================
+    # QDRANT
+    # ========================================================
 
-    print("Connecting to Qdrant...")
+    print(
+        "\nConnecting to Qdrant...",
+        flush=True
+    )
 
     qdrant = QdrantClient(
         url=QDRANT_URL,
@@ -119,36 +260,81 @@ async def lifespan(app: FastAPI):
 
     print(
         "Qdrant collection ready: "
-        + QDRANT_COLLECTION
+        + QDRANT_COLLECTION,
+        flush=True
     )
 
-    # ---------------- GROQ ----------------
+    # ========================================================
+    # GROQ
+    # ========================================================
 
-    print("Connecting to Groq...")
+    print(
+        "\nConnecting to Groq...",
+        flush=True
+    )
+
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY is missing."
+        )
 
     groq_client = Groq(
         api_key=GROQ_API_KEY
     )
 
-    print("Groq client ready.")
+    print(
+        "Groq client ready.",
+        flush=True
+    )
 
-    print("\n" + "=" * 70)
-    print("NMAMIT GRAPH RAG API READY")
-    print("=" * 70)
+    # ========================================================
+    # READY
+    # ========================================================
+
+    print(
+        "\n" + "=" * 70,
+        flush=True
+    )
+
+    print(
+        "NMAMIT GRAPH RAG API READY",
+        flush=True
+    )
+
+    print(
+        "=" * 70,
+        flush=True
+    )
 
     yield
 
-    # ---------------- SHUTDOWN ----------------
+    # ========================================================
+    # SHUTDOWN
+    # ========================================================
 
-    print("\nShutting down...")
+    print(
+        "\nShutting down...",
+        flush=True
+    )
 
-    if driver:
-        driver.close()
+    if driver is not None:
 
-    if qdrant:
-        qdrant.close()
+        try:
+            driver.close()
+        except Exception:
+            pass
 
-    print("Connections closed.")
+    if qdrant is not None:
+
+        try:
+            qdrant.close()
+        except Exception:
+            pass
+
+    print(
+        "Connections closed.",
+        flush=True
+    )
 
 
 # ============================================================
@@ -157,21 +343,33 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="NMAMIT Hybrid Graph RAG",
-    description="NMAMIT information system using Neo4j, Qdrant and Groq.",
+    description=(
+        "NMAMIT information system using "
+        "Neo4j, Qdrant and Groq."
+    ),
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# HEALTH CHECK
+# ROOT
 # ============================================================
 
 @app.get("/")
@@ -184,12 +382,26 @@ def root():
     }
 
 
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/health")
 def health():
 
+    neo4j_ok = False
+
+    if driver is not None:
+
+        try:
+            driver.verify_connectivity()
+            neo4j_ok = True
+        except Exception:
+            neo4j_ok = False
+
     return {
         "status": "healthy",
-        "neo4j": driver is not None,
+        "neo4j": neo4j_ok,
         "qdrant": qdrant is not None,
         "embedding_model": embedding_model is not None,
         "groq": groq_client is not None
@@ -200,8 +412,17 @@ def health():
 # ASK ENDPOINT
 # ============================================================
 
-@app.post("/ask", response_model=AskResponse)
+@app.post(
+    "/ask",
+    response_model=AskResponse
+)
 def ask(request: AskRequest):
+
+    global driver
+
+    # ========================================================
+    # VALIDATE QUESTION
+    # ========================================================
 
     if not request.question.strip():
 
@@ -209,6 +430,10 @@ def ask(request: AskRequest):
             status_code=400,
             detail="Question cannot be empty."
         )
+
+    # ========================================================
+    # CHECK INITIALIZATION
+    # ========================================================
 
     if (
         driver is None
@@ -219,13 +444,63 @@ def ask(request: AskRequest):
 
         raise HTTPException(
             status_code=503,
-            detail="RAG system is still initializing."
+            detail=(
+                "RAG system is still initializing."
+            )
         )
+
+    # ========================================================
+    # ENSURE NEO4J CONNECTION
+    # ========================================================
 
     try:
 
-        # We want the existing RAG pipeline to return
-        # the answer without changing its internal logic.
+        ensure_neo4j_connection()
+
+    except Exception as e:
+
+        print(
+            "\nNEO4J CONNECTION ERROR:",
+            flush=True
+        )
+
+        print(
+            e,
+            flush=True
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Unable to connect to the Neo4j database."
+            )
+        )
+
+    # ========================================================
+    # RUN RAG
+    # ========================================================
+
+    try:
+
+        print(
+            "\n" + "=" * 70,
+            flush=True
+        )
+
+        print(
+            "PROCESSING QUESTION",
+            flush=True
+        )
+
+        print(
+            f"Question: {request.question}",
+            flush=True
+        )
+
+        print(
+            "=" * 70,
+            flush=True
+        )
 
         answer = graph_rag.retrieve_and_answer(
             driver=driver,
@@ -241,12 +516,36 @@ def ask(request: AskRequest):
             answer=answer
         )
 
+    # ========================================================
+    # ERROR HANDLING
+    # ========================================================
+
     except Exception as e:
 
-        print("\nRAG ERROR:")
-        print(e)
+        print(
+            "\n" + "=" * 70,
+            flush=True
+        )
+
+        print(
+            "RAG ERROR",
+            flush=True
+        )
+
+        print(
+            "=" * 70,
+            flush=True
+        )
+
+        print(
+            repr(e),
+            flush=True
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="The RAG system could not process the question."
+            detail=(
+                "The RAG system could not process "
+                "the question."
+            )
         )
