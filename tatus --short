@@ -1,0 +1,18 @@
+[1mdiff --git a/api.py b/api.py[m
+[1mindex 6171a5e..bc3e30d 100644[m
+[1m--- a/api.py[m
+[1m+++ b/api.py[m
+[36m@@ -359,9 +359,10 @@[m [mapp = FastAPI([m
+ app.add_middleware([m
+     CORSMiddleware,[m
+     allow_origins=[[m
+[31m-        "http://localhost:5173",[m
+[31m-        "http://127.0.0.1:5173",[m
+[31m-    ],[m
+[32m+[m[32m    "http://localhost:5173",[m
+[32m+[m[32m    "http://127.0.0.1:5173",[m
+[32m+[m[32m    "https://nmamit-rag-frontend.bravestone-36922c0d.centralindia.azurecontainerapps.io",[m
+[32m+[m[32m],[m
+     allow_credentials=True,[m
+     allow_methods=["*"],[m
+     allow_headers=["*"],[m
