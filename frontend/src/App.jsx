@@ -1,12 +1,47 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 
-const API_URL = "https://nmamit-rag-api.bravestone-36922c0d.centralindia.azurecontainerapps.io";
+const API_URL =
+  "https://nmamit-rag-api.bravestone-36922c0d.centralindia.azurecontainerapps.io";
+
+const BACKGROUNDS = [
+  {
+    name: "Grey Dots",
+    className: "bg-grey-dots",
+  },
+  {
+    name: "Dark",
+    className: "bg-dark",
+  },
+  {
+    name: "Light",
+    className: "bg-light",
+  },
+  {
+    name: "Plain Grey",
+    className: "bg-grey",
+  },
+];
 
 function App() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  const [background, setBackground] = useState(() => {
+    return localStorage.getItem("nmamit-background") || "bg-grey-dots";
+  });
+
+  const [showBackgrounds, setShowBackgrounds] = useState(false);
+
+  useEffect(() => {
+    document.body.className = background;
+    localStorage.setItem("nmamit-background", background);
+
+    return () => {
+      document.body.className = "";
+    };
+  }, [background]);
 
   const askQuestion = async () => {
     const userQuestion = question.trim();
@@ -71,75 +106,112 @@ function App() {
     }
   };
 
-  const useSuggestion = (text) => {
-    setQuestion(text);
-  };
-
   return (
     <div className="app">
-      {/* HEADER */}
+      {/* ================================================
+          HEADER
+      ================================================= */}
+
       <header className="header">
         <div className="brand">
-          <div className="brand-icon">N</div>
+          <div className="brand-mark">N</div>
 
           <div>
             <h1>NMAMIT RAG</h1>
-            <p>Hybrid Graph Retrieval-Augmented Generation</p>
+            <span>Hybrid Graph Retrieval System</span>
           </div>
         </div>
 
-        <div className="status">
-          <span className="status-dot"></span>
-          Online
+        {/* ================================================
+            BACKGROUND SWITCHER
+        ================================================= */}
+
+        <div className="background-switcher">
+          <button
+            className="background-button"
+            onClick={() => setShowBackgrounds((prev) => !prev)}
+            title="Change background"
+          >
+            <span className="background-icon">◐</span>
+            <span>Background</span>
+          </button>
+
+          {showBackgrounds && (
+            <div className="background-menu">
+              <div className="background-menu-title">
+                Choose background
+              </div>
+
+              {BACKGROUNDS.map((item) => (
+                <button
+                  key={item.className}
+                  className={`background-option ${
+                    background === item.className ? "active" : ""
+                  }`}
+                  onClick={() => {
+                    setBackground(item.className);
+                    setShowBackgrounds(false);
+                  }}
+                >
+                  <span
+                    className={`background-preview ${item.className}`}
+                  />
+
+                  <span>{item.name}</span>
+
+                  {background === item.className && (
+                    <span className="check">✓</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </header>
 
-      {/* MAIN */}
+      {/* ================================================
+          MAIN CHAT
+      ================================================= */}
+
       <main className="chat-container">
         {messages.length === 0 ? (
           <section className="welcome">
-            <div className="hero-icon">N</div>
+            <div className="welcome-icon">✦</div>
 
-            <h2>Ask about NMAMIT</h2>
+            <h2>NMAMIT Hybrid Graph RAG</h2>
 
             <p>
-              Search the NMAMIT knowledge base using a hybrid Graph RAG
-              architecture powered by Neo4j, Qdrant and Groq.
+              Ask questions about NMAMIT and retrieve answers
+              using the hybrid Graph RAG system.
             </p>
 
             <div className="suggestions">
               <button
-                onClick={() =>
-                  useSuggestion("Where is NMAMIT located?")
-                }
+                onClick={() => {
+                  setQuestion("What is NMAMIT?");
+                }}
               >
-                Where is NMAMIT located?
+                What is NMAMIT?
               </button>
 
               <button
-                onClick={() =>
-                  useSuggestion("What courses are offered at NMAMIT?")
-                }
+                onClick={() => {
+                  setQuestion(
+                    "What departments are available at NMAMIT?"
+                  );
+                }}
               >
-                What courses are offered?
+                NMAMIT departments
               </button>
 
               <button
-                onClick={() =>
-                  useSuggestion(
-                    "Tell me about the Information Science department."
-                  )
-                }
+                onClick={() => {
+                  setQuestion(
+                    "Tell me about the Information Science and Engineering department."
+                  );
+                }}
               >
-                Information Science department
-              </button>
-
-              <button
-                onClick={() =>
-                  useSuggestion("What is NMAMIT known for?")
-                }
-              >
-                What is NMAMIT known for?
+                Information Science & Engineering
               </button>
             </div>
           </section>
@@ -147,27 +219,39 @@ function App() {
           <section className="messages">
             {messages.map((message, index) => (
               <div
-                className={`message ${message.role}`}
-                key={`${message.role}-${index}`}
+                key={index}
+                className={`message-row ${message.role}`}
               >
-                <div className="message-label">
-                  {message.role === "user" ? "You" : "NMAMIT RAG"}
+                <div className="message-avatar">
+                  {message.role === "user" ? "U" : "N"}
                 </div>
 
                 <div className="message-content">
-                  {message.content}
+                  <div className="message-role">
+                    {message.role === "user"
+                      ? "You"
+                      : "NMAMIT RAG"}
+                  </div>
+
+                  <div className="message-text">
+                    {message.content}
+                  </div>
                 </div>
               </div>
             ))}
 
             {loading && (
-              <div className="message assistant">
-                <div className="message-label">NMAMIT RAG</div>
+              <div className="message-row assistant">
+                <div className="message-avatar">N</div>
 
-                <div className="message-content typing">
-                  <span></span>
-                  <span></span>
-                  <span></span>
+                <div className="message-content">
+                  <div className="message-role">NMAMIT RAG</div>
+
+                  <div className="typing">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
                 </div>
               </div>
             )}
@@ -175,9 +259,12 @@ function App() {
         )}
       </main>
 
-      {/* INPUT */}
+      {/* ================================================
+          INPUT
+      ================================================= */}
+
       <div className="input-area">
-        <div className="input-box">
+        <div className="input-wrapper">
           <textarea
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
@@ -190,16 +277,15 @@ function App() {
           <button
             className="send-button"
             onClick={askQuestion}
-            disabled={loading || !question.trim()}
-            aria-label="Send question"
+            disabled={!question.trim() || loading}
           >
-            ↑
+            {loading ? "..." : "↑"}
           </button>
         </div>
 
-        <p className="footer">
-          NMAMIT Hybrid Graph RAG · Neo4j · Qdrant · Groq
-        </p>
+        <div className="input-hint">
+          Press Enter to ask • Shift + Enter for a new line
+        </div>
       </div>
     </div>
   );
